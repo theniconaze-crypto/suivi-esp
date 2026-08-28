@@ -1,5 +1,5 @@
 export const firebaseConfig = {
-  apiKey: "VOTRE_API_KEY",
+  apiKey: "AIzaSyB6gFF8uic6QMOnrHAvX7nyfs87gHgIxgg",
   authDomain: "Suivi-ESP.firebaseapp.com",
   projectId: "Suivi-ESP",
   storageBucket: "Suivi-ESP.appspot.com",
@@ -9,4 +9,4 @@ export const firebaseConfig = {
 
 // Détecte si la config ci-dessus est toujours le placeholder par défaut.
 export const firebaseConfigEstRenseignee =
-  firebaseConfig.apiKey !== "VOTRE_API_KEY" && !!firebaseConfig.projectId;
+  firebaseConfig.apiKey !== "AIzaSyB6gFF8uic6QMOnrHAvX7nyfs87gHgIxgg" && !!firebaseConfig.projectId;

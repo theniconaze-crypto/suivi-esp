@@ -3,7 +3,8 @@ import {
   LayoutDashboard, Package, CalendarDays, FileText, Plus, Search,
   Edit2, Trash2, X, AlertTriangle, CheckCircle2, Clock, RotateCcw,
   Save, ChevronRight, Gauge, Droplet, MapPin, Building2, Loader2,
-  AlertCircle, ShieldCheck, ClipboardList, ChevronDown, Info
+  AlertCircle, ShieldCheck, ClipboardList, ChevronDown, Info,
+  Paperclip, Eye, Download, FileUp
 } from 'lucide-react';
 
 /* ============================================================
@@ -29,6 +30,20 @@ const STATUTS_VALIDATION = {
 };
 
 const TYPES_DOCUMENT = ['Rapport d\'inspection', 'Procès-verbal de requalification', 'Certificat d\'épreuve', 'Plan d\'inspection', 'Note de calcul', 'Autre'];
+
+// Taille max acceptée pour un fichier joint (les données sont stockées
+// encodées en base64 dans la fiche équipement — voir stockage plus bas —
+// d'où une marge de sécurité par rapport à la limite de 5 Mo par clé de
+// window.storage).
+const FICHIER_MAX_BYTES = 4 * 1024 * 1024; // 4 Mo
+
+// Types de fichiers acceptés lors d'un "ajout document" ou d'une pièce
+// jointe à un contrôle. L'aperçu en pop-up n'est disponible nativement
+// (navigateur) que pour le PDF et les images ; les autres types restent
+// téléchargeables / ouvrables mais sans aperçu intégré.
+const ACCEPT_FICHIER = 'application/pdf,.pdf,image/png,image/jpeg,image/jpg,image/webp,.png,.jpg,.jpeg,.webp,.doc,.docx,.xls,.xlsx,.odt,.ods,.txt';
+const EXTENSIONS_APERCU = ['pdf']; // rendu en <iframe>
+const EXTENSIONS_IMAGE = ['png', 'jpg', 'jpeg', 'webp', 'gif']; // rendu en <img>
 
 const STORAGE_PREFIX = 'equipement:';
 const META_INIT_KEY = 'meta:initialized';
@@ -198,6 +213,36 @@ function getAlertLevel(days) {
   if (days < 30) return { level: 'urgent', label: `${days} j restants`, text: '#FFFFFF', bg: '#DC2626', ring: '#DC2626' };
   if (days <= 90) return { level: 'warning', label: `${days} j restants`, text: '#7C2D12', bg: '#FED7AA', ring: '#EA580C' };
   return { level: 'ok', label: `${days} j restants`, text: '#14532D', bg: '#DCFCE7', ring: '#16A34A' };
+}
+
+function fmtTaille(bytes) {
+  if (!bytes && bytes !== 0) return '';
+  if (bytes < 1024) return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} Ko`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+}
+
+function extensionOf(filename) {
+  const m = /\.([a-z0-9]+)$/i.exec(filename || '');
+  return m ? m[1].toLowerCase() : '';
+}
+
+// Lit un fichier (PDF, image, Word, Excel…) choisi par l'utilisateur et le
+// convertit en data URL base64, seul format que window.storage / localStorage
+// savent persister (texte uniquement — voir la section STOCKAGE plus bas).
+// Retourne { dataUrl, extension, taille, nomOriginal }.
+function readFichierAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const ext = extensionOf(file.name);
+    if (file.size > FICHIER_MAX_BYTES) {
+      reject(new Error(`Le fichier dépasse la taille maximale autorisée (${fmtTaille(FICHIER_MAX_BYTES)}).`));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve({ dataUrl: reader.result, extension: ext, taille: file.size, nomOriginal: file.name });
+    reader.onerror = () => reject(new Error('Impossible de lire le fichier.'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function conformiteStatut(eq) {
@@ -498,16 +543,111 @@ function EquipmentForm({ initial, onCancel, onSave }) {
 }
 
 /* ============================================================
+   POP-UP DE VISUALISATION D'UN DOCUMENT (PDF, image, ou autre)
+   ============================================================ */
+function DocumentViewerModal({ doc, onClose }) {
+  if (!doc || !doc.fichier) return null;
+  const ext = doc.fichierExtension || extensionOf(doc.fichierNomOriginal) || '';
+  const isPdf = EXTENSIONS_APERCU.includes(ext);
+  const isImage = EXTENSIONS_IMAGE.includes(ext);
+  const nomTelechargement = doc.fichierNomOriginal || `${doc.nom || 'document'}${ext ? '.' + ext : ''}`;
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/70 flex items-center justify-center z-[80] p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-lg shadow-2xl w-full max-w-4xl h-[88vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText size={16} className="text-orange-500 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-800 truncate">{doc.nom}</p>
+              <p className="text-xs text-slate-400">
+                {doc.type}{doc.date ? ` · ${fmtDate(doc.date)}` : ''}{doc.fichierTaille ? ` · ${fmtTaille(doc.fichierTaille)}` : ''}{ext ? ` · .${ext}` : ''}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <a
+              href={doc.fichier} download={nomTelechargement}
+              className="p-2 text-slate-500 hover:bg-slate-100 rounded-md" title="Télécharger"
+            ><Download size={16} /></a>
+            <a
+              href={doc.fichier} target="_blank" rel="noreferrer"
+              className="p-2 text-slate-500 hover:bg-slate-100 rounded-md" title="Ouvrir dans un nouvel onglet"
+            ><Eye size={16} /></a>
+            <button onClick={onClose} className="p-2 text-slate-400 hover:bg-slate-100 rounded-md" title="Fermer"><X size={18} /></button>
+          </div>
+        </div>
+        <div className="flex-1 bg-slate-100 min-h-0 flex items-center justify-center overflow-auto">
+          {isPdf ? (
+            <iframe title={doc.nom} src={doc.fichier} className="w-full h-full border-0" />
+          ) : isImage ? (
+            <img src={doc.fichier} alt={doc.nom} className="max-w-full max-h-full object-contain" />
+          ) : (
+            <div className="text-center text-slate-400 p-8">
+              <FileText size={32} className="mx-auto mb-2 opacity-50" />
+              <p className="text-sm">Aperçu non disponible pour ce type de fichier{ext ? ` (.${ext})` : ''}.</p>
+              <p className="text-xs mt-1">Utilisez « Télécharger » ou « Ouvrir dans un nouvel onglet » ci-dessus.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    PANNEAU DETAIL EQUIPEMENT (historique + documents + contrôle)
    ============================================================ */
-function EquipmentDetail({ eq, onClose, onEdit, onDelete, onAddControle, onAddDocument }) {
+const CONTROLE_VIDE = { date: '', type: 'inspection', organisme: '', resultat: '', fichier: null, fichierTaille: null, fichierExtension: null, fichierNomOriginal: null };
+const DOC_VIDE = { nom: '', type: TYPES_DOCUMENT[0], date: '', fichier: null, fichierTaille: null, fichierExtension: null, fichierNomOriginal: null };
+
+function EquipmentDetail({ eq, onClose, onEdit, onDelete, onAddControle, onAddDocument, onViewDocument }) {
   const { nextInspection, nextRequalification, nextEcheance } = computeEcheances(eq);
   const [showAddControle, setShowAddControle] = useState(false);
   const [showAddDoc, setShowAddDoc] = useState(false);
-  const [controle, setControle] = useState({ date: '', type: 'inspection', organisme: eq.organismeHabilite || '', resultat: '' });
-  const [doc, setDoc] = useState({ nom: '', type: TYPES_DOCUMENT[0], date: '' });
+  const [controle, setControle] = useState({ ...CONTROLE_VIDE, organisme: eq.organismeHabilite || '' });
+  const [doc, setDoc] = useState(DOC_VIDE);
+  const [docError, setDocError] = useState('');
+  const [docLoading, setDocLoading] = useState(false);
+  const [controleError, setControleError] = useState('');
+  const [controleLoading, setControleLoading] = useState(false);
 
   const inputCls = "w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/40";
+
+  async function handleDocFichierChange(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // permet de resélectionner le même fichier après une erreur
+    if (!file) return;
+    setDocError('');
+    setDocLoading(true);
+    try {
+      const { dataUrl, extension, taille, nomOriginal } = await readFichierAsDataURL(file);
+      setDoc(d => ({ ...d, fichier: dataUrl, fichierTaille: taille, fichierExtension: extension, fichierNomOriginal: nomOriginal, nom: d.nom || nomOriginal.replace(/\.[^.]+$/, '') }));
+    } catch (err) {
+      setDocError(err.message || 'Impossible de lire ce fichier.');
+    } finally {
+      setDocLoading(false);
+    }
+  }
+
+  async function handleControleFichierChange(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setControleError('');
+    setControleLoading(true);
+    try {
+      const { dataUrl, extension, taille, nomOriginal } = await readFichierAsDataURL(file);
+      setControle(c => ({ ...c, fichier: dataUrl, fichierTaille: taille, fichierExtension: extension, fichierNomOriginal: nomOriginal }));
+    } catch (err) {
+      setControleError(err.message || 'Impossible de lire ce fichier.');
+    } finally {
+      setControleLoading(false);
+    }
+  }
 
   return (
     <div className="fixed inset-0 bg-slate-900/50 flex items-start justify-center z-50 overflow-y-auto p-4">
@@ -569,18 +709,40 @@ function EquipmentDetail({ eq, onClose, onEdit, onDelete, onAddControle, onAddDo
               </button>
             </div>
             {showAddControle && (
-              <div className="bg-slate-50 border border-slate-200 rounded-md p-3 mb-3 grid grid-cols-2 gap-2">
-                <input type="date" className={inputCls} value={controle.date} onChange={e => setControle(c => ({ ...c, date: e.target.value }))} />
-                <select className={inputCls} value={controle.type} onChange={e => setControle(c => ({ ...c, type: e.target.value }))}>
-                  <option value="inspection">Inspection périodique</option>
-                  <option value="requalification">Requalification périodique</option>
-                </select>
-                <input className={inputCls} placeholder="Organisme" value={controle.organisme} onChange={e => setControle(c => ({ ...c, organisme: e.target.value }))} />
-                <input className={inputCls} placeholder="Résultat" value={controle.resultat} onChange={e => setControle(c => ({ ...c, resultat: e.target.value }))} />
-                <div className="col-span-2 flex justify-end gap-2">
-                  <button onClick={() => setShowAddControle(false)} className="px-3 py-1.5 text-xs text-slate-600">Annuler</button>
+              <div className="bg-slate-50 border border-slate-200 rounded-md p-3 mb-3 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="date" className={inputCls} value={controle.date} onChange={e => setControle(c => ({ ...c, date: e.target.value }))} />
+                  <select className={inputCls} value={controle.type} onChange={e => setControle(c => ({ ...c, type: e.target.value }))}>
+                    <option value="inspection">Inspection périodique</option>
+                    <option value="requalification">Requalification périodique</option>
+                  </select>
+                  <input className={inputCls} placeholder="Organisme" value={controle.organisme} onChange={e => setControle(c => ({ ...c, organisme: e.target.value }))} />
+                  <input className={inputCls} placeholder="Résultat" value={controle.resultat} onChange={e => setControle(c => ({ ...c, resultat: e.target.value }))} />
+                </div>
+                <div>
+                  <label className={`flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-md px-3 py-4 cursor-pointer transition-colors ${controle.fichier ? 'border-teal-300 bg-teal-50' : 'border-slate-300 hover:border-orange-400 hover:bg-orange-50/40'}`}>
+                    <input type="file" accept={ACCEPT_FICHIER} className="hidden" onChange={handleControleFichierChange} disabled={controleLoading} />
+                    {controleLoading ? (
+                      <span className="flex items-center gap-2 text-xs text-slate-500"><Loader2 size={16} className="animate-spin" /> Lecture du fichier…</span>
+                    ) : controle.fichier ? (
+                      <span className="flex items-center gap-2 text-xs font-medium text-teal-700">
+                        <CheckCircle2 size={16} /> Pièce jointe : {controle.fichierNomOriginal} ({fmtTaille(controle.fichierTaille)})
+                        <button
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); setControle(c => ({ ...c, fichier: null, fichierTaille: null, fichierExtension: null, fichierNomOriginal: null })); }}
+                          className="ml-1 text-slate-400 hover:text-red-600" title="Retirer le fichier"
+                        ><X size={14} /></button>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-2 text-xs text-slate-500"><FileUp size={16} /> Joindre un justificatif (optionnel, max {fmtTaille(FICHIER_MAX_BYTES)})</span>
+                    )}
+                  </label>
+                  {controleError && <p className="text-xs text-red-600 mt-1 flex items-center gap-1"><AlertCircle size={12} /> {controleError}</p>}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => { setShowAddControle(false); setControle({ ...CONTROLE_VIDE, organisme: eq.organismeHabilite || '' }); setControleError(''); }} className="px-3 py-1.5 text-xs text-slate-600">Annuler</button>
                   <button
-                    onClick={() => { if (!controle.date) return; onAddControle(eq, controle); setControle({ date: '', type: 'inspection', organisme: eq.organismeHabilite || '', resultat: '' }); setShowAddControle(false); }}
+                    onClick={() => { if (!controle.date) return; onAddControle(eq, controle); setControle({ ...CONTROLE_VIDE, organisme: eq.organismeHabilite || '' }); setControleError(''); setShowAddControle(false); }}
                     className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-600 rounded-md">Ajouter</button>
                 </div>
               </div>
@@ -589,16 +751,27 @@ function EquipmentDetail({ eq, onClose, onEdit, onDelete, onAddControle, onAddDo
               <p className="text-sm text-slate-400 italic">Aucun contrôle enregistré.</p>
             ) : (
               <div className="border border-slate-200 rounded-md divide-y divide-slate-100 overflow-hidden">
-                {[...eq.historique].sort((a, b) => b.date.localeCompare(a.date)).map((h, i) => (
-                  <div key={i} className="px-3 py-2 flex items-center justify-between text-sm">
-                    <div>
-                      <span className="font-mono text-xs text-slate-500 mr-2">{fmtDate(h.date)}</span>
-                      <span className="font-medium text-slate-800">{h.type === 'inspection' ? 'Inspection périodique' : 'Requalification périodique'}</span>
-                      <span className="text-slate-500"> — {h.organisme || '—'}</span>
-                    </div>
-                    <span className="text-slate-500 text-xs">{h.resultat}</span>
-                  </div>
-                ))}
+                {[...eq.historique].sort((a, b) => b.date.localeCompare(a.date)).map((h, i) => {
+                  const label = h.type === 'inspection' ? 'Inspection périodique' : 'Requalification périodique';
+                  const hasFichier = !!h.fichier;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => hasFichier && onViewDocument({ nom: `${label} — ${fmtDate(h.date)}`, type: label, date: h.date, fichier: h.fichier, fichierTaille: h.fichierTaille, fichierExtension: h.fichierExtension, fichierNomOriginal: h.fichierNomOriginal })}
+                      disabled={!hasFichier}
+                      title={hasFichier ? 'Voir la pièce jointe' : 'Aucun fichier joint à ce contrôle'}
+                      className={`w-full px-3 py-2 flex items-center justify-between text-sm text-left ${hasFichier ? 'hover:bg-orange-50/60 cursor-pointer' : 'cursor-default'}`}
+                    >
+                      <div className="min-w-0">
+                        <span className="font-mono text-xs text-slate-500 mr-2">{fmtDate(h.date)}</span>
+                        <span className="font-medium text-slate-800">{label}</span>
+                        <span className="text-slate-500"> — {h.organisme || '—'}</span>
+                        {hasFichier && <Paperclip size={12} className="inline ml-1.5 text-orange-500 align-text-top" />}
+                      </div>
+                      <span className="text-slate-500 text-xs shrink-0 pl-2">{h.resultat}</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -611,16 +784,38 @@ function EquipmentDetail({ eq, onClose, onEdit, onDelete, onAddControle, onAddDo
               </button>
             </div>
             {showAddDoc && (
-              <div className="bg-slate-50 border border-slate-200 rounded-md p-3 mb-3 grid grid-cols-2 gap-2">
-                <input className={inputCls + ' col-span-2'} placeholder="Nom du fichier" value={doc.nom} onChange={e => setDoc(d => ({ ...d, nom: e.target.value }))} />
-                <select className={inputCls} value={doc.type} onChange={e => setDoc(d => ({ ...d, type: e.target.value }))}>
-                  {TYPES_DOCUMENT.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-                <input type="date" className={inputCls} value={doc.date} onChange={e => setDoc(d => ({ ...d, date: e.target.value }))} />
-                <div className="col-span-2 flex justify-end gap-2">
-                  <button onClick={() => setShowAddDoc(false)} className="px-3 py-1.5 text-xs text-slate-600">Annuler</button>
+              <div className="bg-slate-50 border border-slate-200 rounded-md p-3 mb-3 space-y-2">
+                <div>
+                  <label className={`flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-md px-3 py-4 cursor-pointer transition-colors ${doc.fichier ? 'border-teal-300 bg-teal-50' : 'border-slate-300 hover:border-orange-400 hover:bg-orange-50/40'}`}>
+                    <input type="file" accept={ACCEPT_FICHIER} className="hidden" onChange={handleDocFichierChange} disabled={docLoading} />
+                    {docLoading ? (
+                      <span className="flex items-center gap-2 text-xs text-slate-500"><Loader2 size={16} className="animate-spin" /> Lecture du fichier…</span>
+                    ) : doc.fichier ? (
+                      <span className="flex items-center gap-2 text-xs font-medium text-teal-700">
+                        <CheckCircle2 size={16} /> Fichier joint : {doc.fichierNomOriginal} ({fmtTaille(doc.fichierTaille)})
+                        <button
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); setDoc(d => ({ ...d, fichier: null, fichierTaille: null, fichierExtension: null, fichierNomOriginal: null })); }}
+                          className="ml-1 text-slate-400 hover:text-red-600" title="Retirer le fichier"
+                        ><X size={14} /></button>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-2 text-xs text-slate-500"><FileUp size={16} /> Cliquer pour choisir un fichier — PDF, image, Word, Excel… (max {fmtTaille(FICHIER_MAX_BYTES)})</span>
+                    )}
+                  </label>
+                  {docError && <p className="text-xs text-red-600 mt-1 flex items-center gap-1"><AlertCircle size={12} /> {docError}</p>}
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input className={inputCls + ' col-span-2'} placeholder="Nom du document" value={doc.nom} onChange={e => setDoc(d => ({ ...d, nom: e.target.value }))} />
+                  <select className={inputCls} value={doc.type} onChange={e => setDoc(d => ({ ...d, type: e.target.value }))}>
+                    {TYPES_DOCUMENT.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  <input type="date" className={inputCls} value={doc.date} onChange={e => setDoc(d => ({ ...d, date: e.target.value }))} />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => { setShowAddDoc(false); setDoc(DOC_VIDE); setDocError(''); }} className="px-3 py-1.5 text-xs text-slate-600">Annuler</button>
                   <button
-                    onClick={() => { if (!doc.nom) return; onAddDocument(eq, doc); setDoc({ nom: '', type: TYPES_DOCUMENT[0], date: '' }); setShowAddDoc(false); }}
+                    onClick={() => { if (!doc.nom) return; onAddDocument(eq, doc); setDoc(DOC_VIDE); setDocError(''); setShowAddDoc(false); }}
                     className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-600 rounded-md">Ajouter</button>
                 </div>
               </div>
@@ -630,10 +825,20 @@ function EquipmentDetail({ eq, onClose, onEdit, onDelete, onAddControle, onAddDo
             ) : (
               <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
                 {eq.documents.map((d, i) => (
-                  <div key={i} className="px-3 py-2 flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-2"><FileText size={14} className="text-slate-400" /><span className="font-medium text-slate-800">{d.nom}</span></div>
-                    <div className="flex items-center gap-3 text-xs text-slate-500"><span>{d.type}</span><span className="font-mono">{fmtDate(d.date)}</span></div>
-                  </div>
+                  <button
+                    key={i}
+                    onClick={() => d.fichier && onViewDocument(d)}
+                    disabled={!d.fichier}
+                    title={d.fichier ? 'Voir le document' : 'Aucun fichier joint à ce document'}
+                    className={`w-full px-3 py-2 flex items-center justify-between text-sm text-left ${d.fichier ? 'hover:bg-orange-50/60 cursor-pointer' : 'cursor-default'}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      {d.fichier ? <Paperclip size={14} className="text-orange-500 shrink-0" /> : <FileText size={14} className="text-slate-300 shrink-0" />}
+                      <span className="font-medium text-slate-800 truncate">{d.nom}</span>
+                      {d.fichier && <span className="text-[9px] font-bold text-orange-600 bg-orange-50 border border-orange-200 rounded px-1 py-0.5 uppercase tracking-wide shrink-0">{d.fichierExtension || 'fichier'}</span>}
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-slate-500 shrink-0"><span>{d.type}</span><span className="font-mono">{fmtDate(d.date)}</span></div>
+                  </button>
                 ))}
               </div>
             )}
@@ -922,10 +1127,21 @@ function CalendrierView({ equipements, onSelect }) {
 /* ============================================================
    VUE DOCUMENTS (vue transverse tous équipements)
    ============================================================ */
-function DocumentsView({ equipements, onSelect }) {
+function DocumentsView({ equipements, onSelect, onViewDocument }) {
   const allDocs = useMemo(() => {
     const list = [];
-    equipements.forEach(eq => (eq.documents || []).forEach(d => list.push({ ...d, eq })));
+    equipements.forEach(eq => {
+      (eq.documents || []).forEach(d => list.push({ ...d, eq }));
+      (eq.historique || []).forEach(h => {
+        if (!h.fichier) return;
+        const label = h.type === 'inspection' ? 'Inspection périodique' : 'Requalification périodique';
+        list.push({
+          nom: `${label} — ${fmtDate(h.date)}`, type: 'Pièce jointe de contrôle', date: h.date,
+          fichier: h.fichier, fichierTaille: h.fichierTaille, fichierExtension: h.fichierExtension, fichierNomOriginal: h.fichierNomOriginal,
+          eq,
+        });
+      });
+    });
     return list.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   }, [equipements]);
 
@@ -935,21 +1151,33 @@ function DocumentsView({ equipements, onSelect }) {
       {allDocs.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <FileText size={32} className="mx-auto mb-2 opacity-40" />
-          <p className="text-sm">Aucun document enregistré. Les métadonnées (nom, type, date) sont ajoutées depuis la fiche de chaque équipement.</p>
+          <p className="text-sm">Aucun document enregistré. Les documents et les pièces jointes de contrôle sont ajoutés depuis la fiche de chaque équipement.</p>
         </div>
       ) : (
         <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-100">
           {allDocs.map((d, i) => (
-            <button key={i} onClick={() => onSelect(d.eq)} className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-slate-50">
-              <div className="flex items-center gap-3 min-w-0">
-                <FileText size={16} className="text-slate-400 shrink-0" />
+            <div key={i} className="flex items-center justify-between px-4 py-3 hover:bg-slate-50">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                {d.fichier ? <Paperclip size={16} className="text-orange-500 shrink-0" /> : <FileText size={16} className="text-slate-300 shrink-0" />}
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-800 truncate">{d.nom}</p>
-                  <p className="text-xs text-slate-400">{d.type} · {d.eq.nom} ({d.eq.numeroIdentification})</p>
+                  <button
+                    onClick={() => d.fichier ? onViewDocument(d) : onSelect(d.eq)}
+                    title={d.fichier ? 'Voir le document' : 'Aucun fichier joint — voir la fiche équipement'}
+                    className="text-sm font-medium text-slate-800 truncate flex items-center gap-1.5 text-left hover:text-orange-700"
+                  >
+                    {d.nom}
+                    {d.fichier && <span className="text-[9px] font-bold text-orange-600 bg-orange-50 border border-orange-200 rounded px-1 py-0.5 uppercase tracking-wide shrink-0">{d.fichierExtension || 'fichier'}</span>}
+                  </button>
+                  <p className="text-xs text-slate-400 truncate">
+                    {d.type} ·{' '}
+                    <button onClick={() => onSelect(d.eq)} className="hover:text-orange-600 hover:underline">
+                      {d.eq.nom} ({d.eq.numeroIdentification})
+                    </button>
+                  </p>
                 </div>
               </div>
-              <span className="font-mono text-xs text-slate-500 shrink-0">{fmtDate(d.date)}</span>
-            </button>
+              <span className="font-mono text-xs text-slate-500 shrink-0 pl-3">{fmtDate(d.date)}</span>
+            </div>
           ))}
         </div>
       )}
@@ -969,6 +1197,7 @@ export default function SuiviESP() {
   const [formEq, setFormEq] = useState(undefined); // undefined = fermé, null = nouveau, objet = édition
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [viewDoc, setViewDoc] = useState(null); // document/pièce jointe actuellement affiché en pop-up
   const [saving, setSaving] = useState(false);
 
   const showError = useCallback((msg) => {
@@ -1142,7 +1371,7 @@ export default function SuiviESP() {
               {activeTab === 'dashboard' && <Dashboard equipements={equipements} onSelect={setDetailEq} />}
               {activeTab === 'inventaire' && <Inventaire equipements={equipements} onSelect={setDetailEq} onNew={() => setFormEq(null)} />}
               {activeTab === 'calendrier' && <CalendrierView equipements={equipements} onSelect={setDetailEq} />}
-              {activeTab === 'documents' && <DocumentsView equipements={equipements} onSelect={setDetailEq} />}
+              {activeTab === 'documents' && <DocumentsView equipements={equipements} onSelect={setDetailEq} onViewDocument={setViewDoc} />}
             </>
           )}
         </div>
@@ -1165,8 +1394,11 @@ export default function SuiviESP() {
           onDelete={(eq) => setConfirmDeleteId(eq.id)}
           onAddControle={handleAddControle}
           onAddDocument={handleAddDocument}
+          onViewDocument={setViewDoc}
         />
       )}
+
+      <DocumentViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} />
 
       {confirmDeleteId && (
         <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-[60] p-4">

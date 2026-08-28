@@ -4,8 +4,13 @@ import {
   Edit2, Trash2, X, AlertTriangle, CheckCircle2, Clock, RotateCcw,
   Save, ChevronRight, Gauge, Droplet, MapPin, Building2, Loader2,
   AlertCircle, ShieldCheck, ClipboardList, ChevronDown, Info,
-  Paperclip, Eye, Download, FileUp
+  Paperclip, Eye, Download, FileUp, Users, WifiOff
 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import {
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot,
+} from 'firebase/firestore';
+import { firebaseConfig, firebaseConfigEstRenseignee } from './firebaseConfig';
 
 /* ============================================================
    CONSTANTES METIER (arrêté du 20/11/2017 - valeurs indicatives)
@@ -257,16 +262,61 @@ function conformiteStatut(eq) {
 /* ============================================================
    STOCKAGE
    ------------------------------------------------------------
-   Dans l'environnement Claude.ai, window.storage (API de
-   persistance des artifacts) est disponible nativement.
-   Hors de Claude.ai (déploiement autonome / GitHub Pages), cette
-   API n'existe pas : on bascule automatiquement sur un adaptateur
-   localStorage qui expose la même interface asynchrone
-   (get/set/delete/list), afin que le reste du code n'ait aucune
-   modification à connaître. Voir le README pour les alternatives
-   (IndexedDB, backend externe) si le volume de données grandit.
+   Trois backends possibles, sélectionnés automatiquement :
+   1. Firestore (Firebase) — si src/firebaseConfig.js a été rempli
+      avec un vrai projet : les données sont dans le cloud,
+      PARTAGÉES entre tous les utilisateurs et synchronisées en
+      temps réel (voir subscribeEquipements plus bas).
+   2. window.storage — si l'app tourne comme artifact Claude.ai
+      et que Firebase n'est pas configuré : stockage persistant
+      mais propre à chaque utilisateur Claude.ai (non partagé).
+   3. localStorage — repli final : stockage local au navigateur
+      uniquement (rien n'est partagé entre PC/utilisateurs).
+   Le reste de l'application ne connaît que l'interface commune
+   get/set/delete/list et n'a pas à savoir laquelle est active.
    ============================================================ */
 const LOCAL_STORAGE_NAMESPACE = 'suivi-esp:';
+const FIRESTORE_COLLECTION = 'suivi_esp_donnees';
+
+export const stockagePartage = firebaseConfigEstRenseignee; // true si Firebase est configuré
+
+let firestoreDb = null;
+if (firebaseConfigEstRenseignee) {
+  try {
+    const app = initializeApp(firebaseConfig);
+    firestoreDb = getFirestore(app);
+  } catch (e) {
+    console.error('Initialisation Firebase impossible :', e);
+  }
+}
+
+function createFirestoreAdapter(db) {
+  const col = collection(db, FIRESTORE_COLLECTION);
+  // Firestore n'autorise pas ':' pour rien de spécial, mais les id de
+  // documents peuvent contenir librement ce caractère — on garde donc
+  // exactement les mêmes clés que les autres backends (ex.
+  // "equipement:eq-123", "meta:initialized").
+  return {
+    async get(key) {
+      const snap = await getDoc(doc(col, key));
+      return snap.exists() ? { key, value: snap.data().value, shared: true } : null;
+    },
+    async set(key, value) {
+      await setDoc(doc(col, key), { value });
+      return { key, value, shared: true };
+    },
+    async delete(key) {
+      await deleteDoc(doc(col, key));
+      return { key, deleted: true, shared: true };
+    },
+    async list(prefix) {
+      const snap = await getDocs(col);
+      const keys = [];
+      snap.forEach(d => { if (!prefix || d.id.startsWith(prefix)) keys.push(d.id); });
+      return { keys, prefix, shared: true };
+    },
+  };
+}
 
 function createLocalStorageAdapter() {
   return {
@@ -304,15 +354,17 @@ function createLocalStorageAdapter() {
   };
 }
 
-// Détection : utilise window.storage (Claude.ai) si présent, sinon localStorage.
-const storageBackend = (typeof window !== 'undefined' && window.storage)
-  ? {
-      get: (k) => window.storage.get(k, false),
-      set: (k, v) => window.storage.set(k, v, false),
-      delete: (k) => window.storage.delete(k, false),
-      list: (p) => window.storage.list(p, false),
-    }
-  : createLocalStorageAdapter();
+// Sélection : Firestore (partagé) > window.storage (Claude.ai) > localStorage.
+const storageBackend = firestoreDb
+  ? createFirestoreAdapter(firestoreDb)
+  : (typeof window !== 'undefined' && window.storage)
+    ? {
+        get: (k) => window.storage.get(k, false),
+        set: (k, v) => window.storage.set(k, v, false),
+        delete: (k) => window.storage.delete(k, false),
+        list: (p) => window.storage.list(p, false),
+      }
+    : createLocalStorageAdapter();
 
 async function storageListEquipments() {
   const res = await storageBackend.list(STORAGE_PREFIX);
@@ -343,6 +395,28 @@ async function storageIsInitialized() {
 }
 async function storageSetInitialized() {
   return storageBackend.set(META_INIT_KEY, '1');
+}
+
+// Abonnement temps réel : n'existe qu'avec Firestore. Appelle onChange(list)
+// à chaque fois que les données changent dans le cloud, y compris quand le
+// changement vient d'un AUTRE utilisateur sur un autre PC. Retourne une
+// fonction de désabonnement (ou null si pas de backend temps réel).
+function subscribeEquipements(onChange, onError) {
+  if (!firestoreDb) return null;
+  const col = collection(firestoreDb, FIRESTORE_COLLECTION);
+  return onSnapshot(
+    col,
+    (snap) => {
+      const list = [];
+      snap.forEach(d => {
+        if (d.id.startsWith(STORAGE_PREFIX)) {
+          try { list.push(JSON.parse(d.data().value)); } catch (e) { /* doc illisible, ignoré */ }
+        }
+      });
+      onChange(list.sort((a, b) => a.nom.localeCompare(b.nom)));
+    },
+    (err) => onError && onError(err)
+  );
 }
 
 /* ============================================================
@@ -1207,26 +1281,46 @@ export default function SuiviESP() {
 
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe = null;
+
+    async function ensureSeed() {
+      const initialized = await storageIsInitialized();
+      if (!initialized) {
+        const seed = buildSeedData();
+        for (const eq of seed) { await storageSave(eq); }
+        await storageSetInitialized();
+        return seed;
+      }
+      return null;
+    }
+
     (async () => {
       setLoading(true);
       try {
-        const initialized = await storageIsInitialized();
-        if (!initialized) {
-          const seed = buildSeedData();
-          for (const eq of seed) { await storageSave(eq); }
-          await storageSetInitialized();
-          if (!cancelled) setEquipements(seed);
+        const seeded = await ensureSeed();
+
+        if (stockagePartage) {
+          // Mode partagé (Firestore) : abonnement temps réel — toute
+          // modification faite par un autre utilisateur, sur un autre PC,
+          // met à jour cet écran automatiquement, sans rechargement.
+          unsubscribe = subscribeEquipements(
+            (list) => { if (!cancelled) { setEquipements(list); setLoading(false); } },
+            (err) => { if (!cancelled) { showError('Connexion au serveur partagé impossible : ' + (err?.message || 'erreur inconnue')); setLoading(false); } }
+          );
+          if (seeded && !cancelled) setEquipements(seeded); // affichage immédiat en attendant le premier événement
         } else {
-          const data = await storageLoadAll();
+          // Mode local (window.storage ou localStorage) : chargement unique.
+          const data = seeded || await storageLoadAll();
           if (!cancelled) setEquipements(data.sort((a, b) => a.nom.localeCompare(b.nom)));
         }
       } catch (e) {
         if (!cancelled) showError('Erreur lors du chargement des données : ' + (e?.message || 'erreur inconnue'));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && !stockagePartage) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => { cancelled = true; if (unsubscribe) unsubscribe(); };
   }, [showError]);
 
   async function persist(eq) {
@@ -1347,6 +1441,15 @@ export default function SuiviESP() {
             <p className="text-xs text-slate-400">Contrôle réglementaire DREAL — suivi en service des équipements sous pression</p>
           </div>
           <div className="flex items-center gap-3">
+            {stockagePartage ? (
+              <span className="text-xs font-medium text-teal-700 bg-teal-50 border border-teal-200 rounded-md px-2.5 py-1.5 flex items-center gap-1.5" title="Les données sont stockées sur Firebase et partagées en temps réel entre tous les utilisateurs.">
+                <Users size={13} /> Données partagées
+              </span>
+            ) : (
+              <span className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5 flex items-center gap-1.5" title="Firebase n'est pas configuré : les données restent locales à ce navigateur et ne sont pas visibles par les autres utilisateurs. Voir le README, section Configuration Firebase.">
+                <WifiOff size={13} /> Données locales uniquement
+              </span>
+            )}
             {saving && <span className="text-xs text-slate-400 flex items-center gap-1"><Loader2 size={13} className="animate-spin" /> Enregistrement…</span>}
             <button onClick={() => setConfirmReset(true)} className="text-xs font-medium text-slate-500 hover:text-red-600 flex items-center gap-1 px-3 py-1.5 border border-slate-200 rounded-md">
               <RotateCcw size={13} /> Réinitialiser les données

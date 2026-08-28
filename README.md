@@ -43,37 +43,69 @@ déploiement :
 ```bash
 npm run preview
 ```
-Persistance des données
-L'application détecte automatiquement son environnement d'exécution :
-Dans Claude.ai (artifact) : elle utilise `window.storage` (API de persistance native des
-artifacts Claude — `get` / `set` / `delete` / `list`). Cette API n'existe pas en dehors de
-l'environnement Claude.ai.
-En dehors de Claude.ai (ce projet, une fois déployé sur GitHub Pages, Vercel, Netlify,
-ou en local) : le code bascule automatiquement sur un adaptateur `localStorage` qui
-reproduit la même interface asynchrone (`get`/`set`/`delete`/`list`). Aucune configuration
-n'est nécessaire — c'est déjà géré dans `src/App.jsx` (voir la fonction `storageBackend`).
-Cette double implémentation permet d'utiliser exactement le même code source dans les deux
-environnements.
-Limites de `localStorage` et alternatives possibles
-`localStorage` est pratique pour démarrer (pas de backend à héberger) mais présente des
-limites à connaître pour un usage en production :
-Limite	Impact
-~5-10 Mo par domaine	Suffisant pour quelques centaines d'équipements avec historique, mais pas illimité
-Local au navigateur	Les données ne sont pas partagées entre postes/utilisateurs ni sauvegardées automatiquement
-Pas de vrai multi-utilisateur	Chaque technicien verrait ses propres données, pas celles de ses collègues
-Pas de sauvegarde côté serveur	Un vidage du cache navigateur = perte des données
-Pour un déploiement en usage réel (plusieurs utilisateurs, sauvegarde fiable, accès multi-poste),
-deux évolutions recommandées, par ordre de complexité croissante :
-IndexedDB (toujours 100% côté navigateur, mais capacité bien plus grande et requêtage
-plus riche que `localStorage`). Bibliothèques utiles : `idb`
-ou Dexie.js. Cela résout la limite de volume mais pas le
-multi-utilisateur / la sauvegarde centralisée.
-Backend externe (recommandé pour un usage HSE multi-utilisateurs en entreprise) :
-exposer une API REST ou GraphQL simple (ex. Node/Express, ou un backend-as-a-service comme
-Supabase / Firebase) qui persiste les équipements dans une vraie base de données (PostgreSQL,
-SQLite, etc.), avec authentification des utilisateurs. Il suffirait alors de remplacer
-l'implémentation de `storageBackend` dans `src/App.jsx` par des appels `fetch()` vers cette
-API — le reste de l'application (calculs d'échéances, alertes, UI) n'a pas besoin de changer.
+Persistance des données et partage multi-utilisateurs
+L'application détecte automatiquement son environnement d'exécution, par ordre de priorité :
+Firebase (Firestore) — si `src/firebaseConfig.js` a été rempli avec un vrai projet
+Firebase : les données sont stockées dans le cloud, partagées entre tous les
+utilisateurs, et synchronisées en temps réel (une modification faite sur un PC apparaît
+automatiquement sur les écrans des autres utilisateurs, sans rechargement de page). C'est la
+configuration recommandée pour un usage à plusieurs. Un badge en haut de l'application
+indique « Données partagées » quand ce mode est actif.
+`window.storage` — si l'app tourne comme artifact dans Claude.ai et que Firebase n'est
+pas configuré : stockage persistant mais propre à chaque utilisateur Claude.ai (non partagé).
+`localStorage` — repli final (hors Claude.ai, Firebase non configuré) : stockage local au
+navigateur uniquement. Un badge orange « Données locales uniquement » s'affiche dans ce cas :
+chaque PC/navigateur a sa propre copie des données, rien n'est partagé.
+Cette sélection automatique permet d'utiliser exactement le même code source dans tous les cas ;
+il n'y a rien à modifier dans l'application elle-même pour activer le partage, seulement à
+renseigner un fichier de configuration (voir ci-dessous).
+Configuration Firebase (partage multi-utilisateurs, gratuit)
+Une fois configuré, tous les utilisateurs de l'application — depuis n'importe quel PC, n'importe
+quel navigateur — voient les mêmes équipements, contrôles et documents, mis à jour en temps réel.
+Aucune ligne de commande n'est nécessaire, tout se fait depuis la console web de Firebase.
+Créer un projet Firebase : aller sur console.firebase.google.com,
+se connecter avec un compte Google, cliquer sur « Ajouter un projet », lui donner un nom (ex.
+`suivi-esp`), puis suivre les étapes (Google Analytics peut être désactivé, il n'est pas
+nécessaire).
+Créer la base de données : dans le menu de gauche du projet, aller dans Firestore
+Database → « Créer une base de données ». Choisir une région proche (ex. `eur3 (europe-west)`), puis démarrer en mode production.
+Régler les règles de sécurité : dans l'onglet Règles de Firestore, remplacer le
+contenu par :
+```
+   rules_version = '2';
+   service cloud.firestore {
+     match /databases/{database}/documents {
+       match /suivi_esp_donnees/{document} {
+         allow read, write: if true;
+       }
+     }
+   }
+   ```
+⚠️ Ces règles ouvrent la lecture/écriture à quiconque connaît l'URL de Firestore associée à
+votre projet (pas seulement l'URL du site). C'est suffisant pour un usage interne où l'outil
+n'est pas largement diffusé, mais ne convient pas si les données sont confidentielles et
+exposées publiquement. Pour restreindre l'accès à des utilisateurs authentifiés, ajouter
+Firebase Authentication (email/mot de passe ou compte Google) est l'évolution recommandée
+— demandez à être accompagné pour cette étape si besoin.
+Récupérer la configuration de l'application : toujours dans la console Firebase, aller
+dans les paramètres du projet (icône ⚙️) → « Vos applications » → « Ajouter une application » →
+choisir le web (icône `</>`) → donner un nom → ne pas cocher « Firebase Hosting ». Firebase
+affiche alors un bloc `firebaseConfig` avec des valeurs (`apiKey`, `projectId`, etc.).
+Coller ces valeurs dans `src/firebaseConfig.js` du projet, à la place des valeurs
+d'exemple (`VOTRE_API_KEY`, etc.).
+Envoyer la modification sur GitHub (remplacer `src/firebaseConfig.js` dans le dépôt). Le
+workflow GitHub Actions rebuild et redéploie automatiquement le site avec Firebase activé.
+Tant que `src/firebaseConfig.js` garde ses valeurs d'exemple, l'application continue de
+fonctionner normalement en mode local (rien ne casse) — le partage n'est simplement pas actif.
+Limites et alternatives
+Solution	Partagé entre utilisateurs	Temps réel	Configuration
+`localStorage` (par défaut)	❌ Non	—	Aucune
+`window.storage` (Claude.ai)	❌ Non (par utilisateur Claude.ai)	❌ Non	Aucune
+Firebase Firestore	✅ Oui	✅ Oui	Console Firebase (voir ci-dessus)
+Le tier gratuit de Firestore (50 000 lectures et 20 000 écritures par jour) est très largement
+suffisant pour ce type d'outil interne. Si un contrôle d'accès plus strict est nécessaire
+(utilisateurs nommés, rôles, traçabilité des modifications), Firebase Authentication peut être
+ajouté sans changer l'architecture globale.
 Structure du projet
 ```
 suivi-esp/
@@ -87,6 +119,7 @@ suivi-esp/
 └── src/
     ├── main.jsx             # Point d'entrée React
     ├── App.jsx               # Composant principal (toute la logique métier + UI)
+    ├── firebaseConfig.js     # Identifiants du projet Firebase (à renseigner, voir plus haut)
     └── index.css             # Import des directives Tailwind
 ```
 Technologies utilisées
